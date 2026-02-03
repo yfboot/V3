@@ -1,0 +1,51 @@
+# ========== 依赖与构建产物 ==========
+# 下载的 npm 包（.tgz），体积大且可重新生成
+packages/
+node_modules/
+node_modules_pack/
+
+# Python 虚拟环境与缓存
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# ========== 日志与报告 ==========
+logs/
+*.log
+download_log.txt
+missing-packages-report.txt
+
+# ========== 可执行与敏感配置 ==========
+# 本地打包的 exe（若有源码即可重新生成）
+*.exe
+.npmrc
+package.json
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+# ========== 系统与 IDE ==========
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-*
+
+# ========== 环境与临时 ==========
+.env
+.env.local
+.env.*.local
+*.tmp
+*.temp
+.cache/

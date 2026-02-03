@@ -1,0 +1,1136 @@
+import asyncio
+import json
+import os
+from urllib.parse import urlparse, unquote
+import re
+import sys
+import io
+import argparse
+import time
+import subprocess
+import locale
+
+# ===== 依赖自检/自动安装 =====
+def ensure_runtime_deps():
+    """
+    确保运行时依赖可用：
+    - aiohttp
+    - PyYAML (import 名为 yaml)
+    """
+    missing = []
+    try:
+        import aiohttp  # noqa: F401
+    except Exception:
+        missing.append("aiohttp")
+
+    try:
+        import yaml  # noqa: F401
+    except Exception:
+        missing.append("PyYAML")
+
+    if not missing:
+        return
+
+    print(f"检测到缺少依赖: {', '.join(missing)}，正在尝试自动安装...")
+    try:
+        subprocess.check_call(
+            [sys.executable, "-m", "pip", "install", "--upgrade", *missing],
+            shell=False,
+        )
+        print("依赖安装完成，继续运行。\n")
+    except Exception as e:
+        print(f"自动安装失败：{e}")
+        print("请手动执行以下命令后重试：")
+        print(f"  {sys.executable} -m pip install --upgrade " + " ".join(missing))
+        raise
+
+
+ensure_runtime_deps()
+
+# 依赖已就绪后再导入
+import aiohttp
+import yaml
+
+# ===== 解决控制台编码问题 =====
+def setup_console_encoding():
+    """设置控制台编码为UTF-8，解决中文乱码问题"""
+    if sys.platform == 'win32':
+        # 尝试设置控制台代码页为UTF-8 (65001)，避免 chcp 输出干扰
+        try:
+            subprocess.run(
+                ['chcp', '65001'],
+                check=False,
+                shell=True,
+                capture_output=True,
+                timeout=2,
+            )
+        except Exception:
+            pass
+            
+        # 设置Python环境变量
+        os.environ['PYTHONIOENCODING'] = 'utf-8'
+        
+        # 获取系统默认编码
+        system_encoding = locale.getpreferredencoding()
+        
+        # 为Windows控制台重定向标准输出流，并启用行缓冲以便输出立即显示
+        try:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+            sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace', line_buffering=True)
+        except Exception:
+            try:
+                sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=system_encoding, errors='replace', line_buffering=True)
+                sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=system_encoding, errors='replace', line_buffering=True)
+            except Exception:
+                pass
+
+# 设置控制台编码
+setup_console_encoding()
+
+# ===== 表情符号兼容处理 =====
+class Emoji:
+    """表情符号类，根据运行环境自动选择合适的显示方式"""
+    
+    def __init__(self):
+        # 检测是否在exe中运行
+        self.is_exe = getattr(sys, 'frozen', False)
+        # 检测是否支持表情符号
+        self.supports_emoji = self._check_emoji_support()
+        
+        # 表情符号映射表 (Unicode表情 -> ASCII替代)
+        self.emoji_map = {
+            "✅": "[OK]",     # 成功
+            "❌": "[X]",      # 失败
+            "⚠️": "[!]",      # 警告
+            "🔍": "[?]",      # 搜索
+            "📦": "[PKG]",    # 包
+            "🎉": "[YAY]",    # 庆祝
+            "🔧": "[TOOL]",   # 工具
+            "⏱️": "[TIME]",   # 时间
+            "📊": "[STAT]",   # 统计
+            "📝": "[LOG]",    # 日志
+            "🚫": "[BLOCK]",  # 禁止
+            "🔁": "[RETRY]",  # 重试
+        }
+    
+    def _check_emoji_support(self):
+        """检查环境是否支持表情符号"""
+        # 在exe中默认不支持
+        if self.is_exe:
+            return False
+            
+        # 检查是否在Windows终端或支持Unicode的终端中
+        if sys.platform == 'win32':
+            term = os.environ.get('WT_SESSION') or os.environ.get('TERM_PROGRAM')
+            if term in ['Windows Terminal', 'vscode']:
+                return True
+            return False
+        
+        # 其他平台默认支持
+        return True
+    
+    def get(self, emoji_char):
+        """获取适合当前环境的表情符号表示"""
+        if self.supports_emoji:
+            return emoji_char
+        return self.emoji_map.get(emoji_char, "[?]")
+
+# 初始化表情符号处理器
+emoji = Emoji()
+
+# ===== 解析命令行参数 =====
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='下载 npm/yarn/pnpm 依赖包到本地')
+    parser.add_argument('--no-dev', action='store_true', help='不下载开发依赖 (devDependencies)')
+    parser.add_argument('--no-optional', action='store_true', help='不下载可选依赖 (optionalDependencies)')
+    parser.add_argument('--include-peer', action='store_true', help='尝试下载peer dependencies（从package.json提取）')
+    parser.add_argument('--no-peer-from-lock', action='store_true', help='不补下 lock 中未带 resolved 的 peer/optional 依赖（默认会补下）')
+    parser.add_argument('--timeout', type=int, default=30, help='下载超时时间 (秒)')
+    parser.add_argument('--concurrency', type=int, default=10, help='并发下载数量')
+    parser.add_argument('--registry', type=str, default='https://registry.npmmirror.com', help='指定npm镜像源')
+    parser.add_argument('--output-dir', type=str, default='./packages', help='下载包保存目录')
+    return parser.parse_args()
+
+# ===== 配置 =====
+args = parse_arguments()
+PACKAGES_PATH = args.output_dir
+MAX_RETRIES = 3
+TIMEOUT = args.timeout
+CONCURRENT_LIMIT = args.concurrency
+CUSTOM_REGISTRY = args.registry
+INCLUDE_DEV = not args.no_dev  # 默认包含开发依赖
+INCLUDE_OPTIONAL = not args.no_optional  # 默认包含可选依赖
+INCLUDE_PEER = args.include_peer  # 是否包含peer dependencies（从 package.json 提取）
+INCLUDE_PEER_FROM_LOCK = not getattr(args, 'no_peer_from_lock', False)  # 默认从 lock 补下未 resolved 的 peer/optional
+DOWNLOAD_LOG = "logs/npm_package_download.log"  # 每次运行覆盖，记录 404 及错误
+
+# ===== 工具函数 =====
+def replace_registry(url, use_custom=True):
+    """替换为自定义镜像"""
+    if use_custom:
+        url = url.replace("https://registry.npmjs.org/", CUSTOM_REGISTRY + "/")
+        url = url.replace("https://registry.npmmirror.com/", CUSTOM_REGISTRY + "/")
+    return url
+
+# ===== 安全路径处理 =====
+def sanitize_path(path):
+    """将非法路径字符替换为安全字符"""
+    return re.sub(r'[<>:"/\\|?*\x00-\x1F()@]', '_', path)
+
+# ===== 辅助函数 =====
+def normalize_package_name(name):
+    """标准化包名以便正确构建URL"""
+    # 处理scope包 @types/node -> @types/node
+    if name.startswith('@'):
+        return name
+    return name.lower()  # npm包名不区分大小写
+
+def clean_package_url(url):
+    """清理URL中的嵌套依赖信息"""
+    # 基本npm包URL格式: registry/name/-/name-version.tgz
+    parsed = urlparse(url)
+    path = parsed.path
+    
+    # 如果没有嵌套括号，直接返回
+    if '(' not in path and ')' not in path:
+        return url
+    
+    try:
+        # 提取主要部分
+        # 对于 /pkg/-/pkg-1.0.0(dep1)(dep2).tgz 提取成 /pkg/-/pkg-1.0.0.tgz
+        main_path = re.sub(r'(\([^()]*(?:\([^()]*\)[^()]*)*\))+\.tgz$', '.tgz', path)
+        
+        # 如果清理失败，尝试更复杂的方法
+        if '(' in main_path:
+            # 识别作用域包 /@scope/pkg/-/pkg-1.0.0(...)
+            if '/@' in path and '/-/' in path:
+                scope_end = path.find('/-/')
+                if scope_end > 0:
+                    scope_part = path[:scope_end]  # 例如 /@scope/pkg
+                    file_part = path[scope_end+3:] # 例如 pkg-1.0.0(...).tgz
+                    if '(' in file_part:
+                        # 提取版本号
+                        pkg_name = scope_part.split('/')[-1]
+                        version_match = re.match(f'{pkg_name}-([0-9]+\\.[0-9]+\\.[0-9]+[^()]*)\\(', file_part)
+                        if version_match:
+                            version = version_match.group(1)
+                            main_path = f"{scope_part}/-/{pkg_name}-{version}.tgz"
+            else:
+                # 处理普通包 /pkg/-/pkg-1.0.0(...)
+                base_path_match = re.match(r'^(/[^/]+/-/[^/]+-\d+\.\d+\.\d+)', path)
+                if base_path_match:
+                    main_path = f"{base_path_match.group(1)}.tgz"
+                else:
+                    # 最后尝试
+                    pkg_path = path.split('/-/')[0] if '/-/' in path else ''
+                    file_name = os.path.basename(path)
+                    version_match = re.match(r'.*?-(\d+\.\d+\.\d+[^()]*?)[\(\.]', file_name)
+                    if version_match and pkg_path:
+                        pkg_name = os.path.basename(pkg_path)
+                        version = version_match.group(1)
+                        main_path = f"{pkg_path}/-/{pkg_name}-{version}.tgz"
+        
+        # 重建URL
+        cleaned_url = f"{parsed.scheme}://{parsed.netloc}{main_path}"
+        if url != cleaned_url:
+            print(f"{emoji.get('🔧')} 修正包URL: {url.split('/')[-1]} -> {cleaned_url.split('/')[-1]}")
+        return cleaned_url
+    except Exception as e:
+        print(f"{emoji.get('⚠️')} URL清理失败，使用原始URL: {url}, 错误: {str(e)[:100]}")
+        return url
+        
+# ===== 处理包URL =====
+def add_url_to_download(urls_set, url):
+    """添加URL到下载集合，处理URL格式问题"""
+    # 清理嵌套依赖信息
+    clean_url = clean_package_url(url)
+    urls_set.add(clean_url)
+
+# ===== 从 lock 中收集“有 resolved”的包名（用于排除已存在的 peer/optional） =====
+def _npm_lock_resolved_names(lockfile_data):
+    """返回 package-lock 中已有 resolved 的包名集合（含 node_modules/ 前缀已去掉）。"""
+    names = set()
+    if 'packages' not in lockfile_data:
+        return names
+    for pkg_path, pkg_info in lockfile_data['packages'].items():
+        if not pkg_path or not isinstance(pkg_info, dict) or 'resolved' not in pkg_info:
+            continue
+        # node_modules/@types/lodash.merge -> @types/lodash.merge
+        name = pkg_path.replace('node_modules/', '', 1).strip('/')
+        if name:
+            names.add(name)
+    return names
+
+
+def _parse_version_tuple(version_str):
+    """将 4.6.7 或 4.6.7-beta.1 解析为 (4, 6, 7) 用于比较，预发布只取数字部分。"""
+    m = re.match(r'^(\d+)\.(\d+)\.(\d+)', str(version_str).strip())
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    return (0, 0, 0)
+
+
+def _version_satisfies_range(version_str, range_str):
+    """简单判断 version 是否满足 range（支持 ^x.y.z、>=x.y.z、x.y.z）。"""
+    v = _parse_version_tuple(version_str)
+    range_str = (range_str or '').strip()
+    range_match = re.match(r'^(\^|>=|~)?\s*(\d+\.\d+\.\d+[^\s]*)', range_str)
+    if not range_match:
+        return False
+    prefix, base = range_match.group(1), range_match.group(2)
+    b = _parse_version_tuple(base)
+    if prefix == '^':
+        # ^x.y.z => >= x.y.z and < (x+1).0.0
+        return v >= b and (v[0] < b[0] + 1 if b[0] > 0 else True)
+    if prefix == '>=':
+        return v >= b
+    if prefix == '~':
+        # ~x.y.z => >= x.y.z and < x.(y+1).0
+        return v >= b and (v[0], v[1]) <= (b[0], b[1]) and (v[0] < b[0] or v[1] < b[1] + 1)
+    # 无前缀视为精确
+    return v == b
+
+
+def _pick_best_version(versions_dict, range_str):
+    """从 versions 的 key 中选一个满足 range 的最高版本。"""
+    candidates = []
+    for ver in versions_dict:
+        if _version_satisfies_range(ver, range_str):
+            candidates.append((_parse_version_tuple(ver), ver))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+
+# ===== 从 lock 中收集“未带 resolved”的依赖（仅 npm lock v2/v3） =====
+def collect_missing_peer_optional_from_lock(lockfile_data, existing_urls):
+    """
+    从 package-lock.json 的 packages 里收集所有 peerDependencies、optionalDependencies、dependencies
+    中出现的依赖；若该依赖在 lock 中没有自己的 resolved 条目（或未出现在 existing_urls 中），
+    则视为缺失，返回 [(name, range), ...]。这样即使 lock 因 npm 版本/安装方式未生成某包的
+    resolved，只要某包声明了该依赖，也会被补下（如 @types/event-emitter）。
+    existing_urls: 当前已收集到的 tarball URL 列表，用于解析出已存在的包名，避免重复。
+    """
+    if 'packages' not in lockfile_data:
+        return []
+    resolved_names = _npm_lock_resolved_names(lockfile_data)
+    for url in (existing_urls or []):
+        try:
+            name, _ = extract_package_info(url)
+            if name:
+                resolved_names.add(name)
+        except Exception:
+            pass
+    missing = []
+    seen = set()
+    # 同时检查 dependencies，避免因 lock 未包含某包 resolved 而漏下（如部分 npm/install 场景）
+    for pkg_path, pkg_info in lockfile_data['packages'].items():
+        if not isinstance(pkg_info, dict):
+            continue
+        for key in ('peerDependencies', 'optionalDependencies', 'dependencies'):
+            deps = pkg_info.get(key)
+            if not isinstance(deps, dict):
+                continue
+            for dep_name, range_spec in deps.items():
+                dep_name = (dep_name or '').strip()
+                if not dep_name or dep_name in resolved_names:
+                    continue
+                # lock 里 dependencies 的值可能是版本或 range 字符串
+                spec_str = (range_spec if isinstance(range_spec, str) else str(range_spec or 'latest')).strip()
+                spec = (dep_name, spec_str)
+                if spec in seen:
+                    continue
+                seen.add(spec)
+                missing.append(spec)
+    return missing
+
+
+# ===== 通过 registry 将 (name, range) 解析为 tarball URL =====
+async def resolve_spec_to_tarball_url(session, name, range_spec, registry):
+    """请求 registry 包元数据，解析 range 得到具体版本，返回 tarball URL；失败返回 None。"""
+    registry = registry.rstrip('/')
+    try:
+        if name.startswith('@'):
+            scope, pkg_name = name.split('/', 1)
+            pkg_url = f"{registry}/{scope}%2F{pkg_name}"
+        else:
+            pkg_url = f"{registry}/{name}"
+        async with session.get(pkg_url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+    except Exception:
+        return None
+    versions = data.get('versions') or {}
+    if not versions:
+        return None
+    range_str = (range_spec or 'latest').strip()
+    if range_str == 'latest' and 'dist-tags' in data and 'latest' in data['dist-tags']:
+        version = data['dist-tags']['latest']
+    else:
+        version = _pick_best_version(versions, range_str)
+        if not version:
+            version = data.get('dist-tags', {}).get('latest') or list(versions.keys())[-1]
+    if version not in versions:
+        return None
+    dist = versions[version].get('dist') or {}
+    tarball = dist.get('tarball')
+    if not tarball or not tarball.startswith('http'):
+        return None
+    return replace_registry(tarball)
+
+
+# ===== 提取依赖函数 =====
+def extract_npm_urls(lockfile_data):
+    urls = set()
+
+    def recurse_deps(deps, is_npm7=False):
+        if not isinstance(deps, dict):
+            return
+            
+        for name, info in deps.items():
+            if isinstance(info, dict):
+                # 处理npm7+格式 (package-lock.json v2+)
+                if is_npm7 and 'resolved' in info:
+                    resolved_url = info['resolved']
+                    if resolved_url.startswith('http'):
+                        add_url_to_download(urls, replace_registry(resolved_url))
+                
+                # 处理常规依赖
+                if 'resolved' in info and info['resolved'].startswith('http'):
+                    add_url_to_download(urls, replace_registry(info['resolved']))
+                    
+                # 处理子依赖
+                if 'dependencies' in info:
+                    recurse_deps(info['dependencies'], is_npm7)
+                    
+                # 处理require节点
+                if 'requires' in info and not is_npm7:
+                    # npm <= 6 有时会将依赖放在requires节点
+                    for req_name, req_version in info['requires'].items():
+                        # 尝试在父节点找resolved URL
+                        for parent_name, parent_info in deps.items():
+                            if isinstance(parent_info, dict) and parent_name == req_name and 'resolved' in parent_info:
+                                add_url_to_download(urls, replace_registry(parent_info['resolved']))
+
+    # 处理 package-lock.json v2 (npm 7+) 格式
+    if 'packages' in lockfile_data:
+        is_npm7 = True
+        for pkg_path, pkg_info in lockfile_data['packages'].items():
+            if pkg_path == '':  # 跳过根包
+                continue
+                
+            if isinstance(pkg_info, dict) and 'resolved' in pkg_info:
+                # 检查开发依赖标记
+                if 'dev' in pkg_info and pkg_info['dev'] is True and not INCLUDE_DEV:
+                    continue  # 如果是开发依赖且不包含开发依赖，则跳过
+                    
+                # 检查可选依赖标记
+                if 'optional' in pkg_info and pkg_info['optional'] is True and not INCLUDE_OPTIONAL:
+                    continue  # 如果是可选依赖且不包含可选依赖，则跳过
+                    
+                resolved_url = pkg_info['resolved']
+                if resolved_url.startswith('http'):
+                    add_url_to_download(urls, replace_registry(resolved_url))
+
+    # 处理传统 package-lock.json 格式
+    if 'dependencies' in lockfile_data:
+        recurse_deps(lockfile_data['dependencies'], 'packages' in lockfile_data)
+        
+    # 处理开发依赖（如果需要）
+    if INCLUDE_DEV and 'devDependencies' in lockfile_data:
+        recurse_deps(lockfile_data['devDependencies'], 'packages' in lockfile_data)
+        
+    # 处理可选依赖（如果需要）
+    if INCLUDE_OPTIONAL and 'optionalDependencies' in lockfile_data:
+        recurse_deps(lockfile_data['optionalDependencies'], 'packages' in lockfile_data)
+        
+    return list(urls)
+
+def extract_pnpm_urls(lockfile_data):
+    urls = set()
+    workspace_packages = set()
+    
+    # 尝试读取 pnpm-workspace.yaml 以获取工作区信息
+    try:
+        if os.path.exists('pnpm-workspace.yaml'):
+            with open('pnpm-workspace.yaml', encoding='utf-8') as f:
+                workspace_data = yaml.safe_load(f)
+                if workspace_data and 'packages' in workspace_data:
+                    for pattern in workspace_data['packages']:
+                        # 记录可能的工作区前缀
+                        if pattern.endswith('/*'):
+                            workspace_packages.add(pattern[:-2])
+            print(f"{emoji.get('✅')} 已识别工作区目录: {', '.join(workspace_packages)}")
+    except Exception as e:
+        print(f"{emoji.get('⚠️')} 读取 pnpm-workspace.yaml 失败: {str(e)}")
+    
+    # 判断是否为工作区包
+    def is_workspace_package(pkg_name, version_info):
+        # 直接检查版本是否为 workspace: 或 link: 开头
+        if isinstance(version_info, str) and (version_info.startswith('workspace:') or version_info.startswith('link:')):
+            return True
+            
+        # 检查复杂对象的 specifier 和 version 字段
+        if isinstance(version_info, dict):
+            specifier = version_info.get('specifier', '')
+            version = version_info.get('version', '')
+            
+            if (isinstance(specifier, str) and specifier.startswith('workspace:')) or \
+               (isinstance(version, str) and version.startswith('link:')):
+                return True
+                
+        return False
+    
+    # 处理包直接URL或构造URL
+    def add_package_url(pkg_name, version, resolved=None):
+        # 已经有明确的resolved URL
+        if resolved and resolved.startswith('http'):
+            add_url_to_download(urls, replace_registry(resolved))
+            return True
+            
+        # 跳过workspace packages和本地链接
+        if isinstance(version, str):
+            # 检查明确的workspace或link前缀
+            if version.startswith('link:') or version.startswith('workspace:'):
+                print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{version}")
+                return False
+                
+            # 检查包是否在工作区路径中
+            for workspace in workspace_packages:
+                if version.startswith(f"link:{workspace}/"):
+                    print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{version}")
+                    return False
+            
+        # 处理scoped包名 (@scope/package)
+        if pkg_name.startswith('@'):
+            try:
+                scope, name = pkg_name.split('/', 1)
+                # 构建完整URL，保留作用域
+                url = f"{CUSTOM_REGISTRY}/{pkg_name}/-/{name}-{version}.tgz"
+            except Exception as e:
+                print(f"{emoji.get('⚠️')} 处理作用域包出错: {pkg_name}@{version}, 错误: {str(e)}")
+                # 降级处理
+                url = f"{CUSTOM_REGISTRY}/{pkg_name}/-/{pkg_name.split('/')[-1]}-{version}.tgz"
+        else:
+            url = f"{CUSTOM_REGISTRY}/{pkg_name}/-/{pkg_name}-{version}.tgz"
+            
+        add_url_to_download(urls, url)
+        return True
+
+    # 递归处理packages部分
+    def process_packages():
+        if 'packages' not in lockfile_data:
+            return
+            
+        for path, pkg_info in lockfile_data['packages'].items():
+            # 忽略根包
+            if path == '':
+                continue
+                
+            # 提取包名和版本号
+            if path.startswith('node_modules/'):
+                pkg_name = path.replace('node_modules/', '')
+            else:
+                pkg_name = path
+                
+            # 跳过工作区包
+            if pkg_info and is_workspace_package(pkg_name, pkg_info):
+                print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{str(pkg_info).split(',')[0] if isinstance(pkg_info, dict) else pkg_info}")
+                continue
+                
+            # 处理已解析的URL
+            if pkg_info and isinstance(pkg_info, dict):
+                # 如果是开发依赖且不包含开发依赖，则跳过
+                if 'dev' in pkg_info and pkg_info['dev'] is True and not INCLUDE_DEV:
+                    continue
+                    
+                # 如果是可选依赖且不包含可选依赖，则跳过
+                if 'optional' in pkg_info and pkg_info['optional'] is True and not INCLUDE_OPTIONAL:
+                    continue
+                
+                version = pkg_info.get('version')
+                resolved = pkg_info.get('resolved')
+                
+                # 如果有明确的resolved字段，直接使用它
+                if resolved:
+                    add_package_url(pkg_name, version, resolved)
+                elif version:
+                    # 清理版本号中的括号内容
+                    if isinstance(version, str):
+                        # 跳过工作区链接
+                        if version.startswith('link:') or version.startswith('workspace:'):
+                            print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{version}")
+                            continue
+                            
+                        version_match = re.match(r'^([^()]+)', version)
+                        if version_match:
+                            version = version_match.group(1).strip()
+                    add_package_url(pkg_name, version)
+    
+    # 递归处理依赖部分
+    def process_dependencies(deps_dict, is_dev=False):
+        if not deps_dict or not isinstance(deps_dict, dict):
+            return
+            
+        for pkg_name, info in deps_dict.items():
+            # 跳过工作区包
+            if is_workspace_package(pkg_name, info):
+                print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{str(info).split(',')[0] if isinstance(info, dict) else info}")
+                continue
+                
+            if isinstance(info, dict):
+                # 如果是开发依赖且不包含开发依赖，则跳过
+                if is_dev and not INCLUDE_DEV:
+                    continue
+                    
+                # 如果是optional且不包含optional，则跳过
+                if info.get('optional') and not INCLUDE_OPTIONAL:
+                    continue
+                    
+                version = info.get('version')
+                resolved = info.get('resolved')
+                
+                if version or resolved:
+                    add_package_url(pkg_name, version, resolved)
+                
+                # 递归处理子依赖
+                if 'dependencies' in info:
+                    process_dependencies(info['dependencies'])
+                    
+            elif isinstance(info, str):
+                # 跳过工作区包
+                if info.startswith('workspace:') or info.startswith('link:'):
+                    print(f"{emoji.get('⚠️')} 跳过工作区包：{pkg_name}@{info}")
+                    continue
+                    
+                # 如果是开发依赖且不包含开发依赖，则跳过
+                if is_dev and not INCLUDE_DEV:
+                    continue
+                    
+                # 简单的版本字符串
+                version_match = re.match(r'^([^()]+)', info)
+                version = version_match.group(1).strip() if version_match else info
+                add_package_url(pkg_name, version)
+
+    # 处理主要依赖部分
+    if 'importers' in lockfile_data:
+        for path, importer in lockfile_data['importers'].items():
+            if isinstance(importer, dict):
+                # 处理正常依赖
+                if 'dependencies' in importer:
+                    process_dependencies(importer['dependencies'])
+                    
+                # 处理开发依赖
+                if 'devDependencies' in importer:
+                    process_dependencies(importer['devDependencies'], True)
+                    
+                # 处理可选依赖
+                if 'optionalDependencies' in importer and INCLUDE_OPTIONAL:
+                    process_dependencies(importer['optionalDependencies'])
+    
+    # 处理顶级dependencies
+    if 'dependencies' in lockfile_data:
+        process_dependencies(lockfile_data['dependencies'])
+        
+    # 处理顶级devDependencies
+    if 'devDependencies' in lockfile_data and INCLUDE_DEV:
+        process_dependencies(lockfile_data['devDependencies'], True)
+        
+    # 处理顶级optionalDependencies
+    if 'optionalDependencies' in lockfile_data and INCLUDE_OPTIONAL:
+        process_dependencies(lockfile_data['optionalDependencies'])
+        
+    # 处理packages部分
+    process_packages()
+
+    return list(urls)
+
+def extract_yarn_urls(lockfile_data):
+    urls = set()
+    
+    # 匹配yarn.lock中的URL
+    resolved_pattern = re.compile(r'"resolved"\s+"(https?://[^"]+)"')
+    registry_pattern = re.compile(r'"registry"\s+"(https?://[^"]+)"')
+    version_pattern = re.compile(r'"version"\s+"([^"]+)"') 
+    name_pattern = re.compile(r'^([@a-zA-Z0-9_-]+(?:/[a-zA-Z0-9_-]+)?)')
+    
+    lines = lockfile_data.splitlines()
+    i = 0
+    
+    while i < len(lines):
+        line = lines[i].strip()
+        
+        # 检查是否为包声明行
+        if line and line.endswith(':'):
+            pkg_match = name_pattern.search(line)
+            if pkg_match:
+                pkg_name = pkg_match.group(1).strip('"\'')
+                
+                # 查找此包的version和resolved
+                resolved_url = None
+                version = None
+                j = i + 1
+                
+                # 扫描到下一个包声明前或文件结束
+                while j < len(lines) and not (lines[j].strip() and lines[j].strip().endswith(':')):
+                    resolved_match = resolved_pattern.search(lines[j])
+                    if resolved_match:
+                        resolved_url = resolved_match.group(1)
+                        if resolved_url.startswith('http'):
+                            add_url_to_download(urls, replace_registry(resolved_url))
+                            
+                    # 如果没有resolved但有version和registry，尝试构造URL
+                    if not resolved_url:
+                        version_match = version_pattern.search(lines[j])
+                        if version_match:
+                            version = version_match.group(1)
+                            
+                        registry_match = registry_pattern.search(lines[j])
+                        if registry_match and version:
+                            registry = registry_match.group(1).rstrip('/')
+                            # 构造可能的URL，正确处理作用域包
+                            if pkg_name.startswith('@'):
+                                scope, name = pkg_name.split('/', 1)
+                                potential_url = f"{registry}/{pkg_name}/-/{name}-{version}.tgz"
+                            else:
+                                potential_url = f"{registry}/{pkg_name}/-/{pkg_name}-{version}.tgz"
+                            add_url_to_download(urls, replace_registry(potential_url))
+                            
+                    j += 1
+                
+                # 如果版本号存在但没有resolved URL或registry，尝试使用默认registry
+                if version and not resolved_url:
+                    if pkg_name.startswith('@'):
+                        scope, name = pkg_name.split('/', 1)
+                        add_url_to_download(urls, f"{CUSTOM_REGISTRY}/{pkg_name}/-/{name}-{version}.tgz")
+                    else:
+                        add_url_to_download(urls, f"{CUSTOM_REGISTRY}/{pkg_name}/-/{pkg_name}-{version}.tgz")
+                
+                i = j - 1  # 调整主循环索引
+        
+        i += 1
+        
+    return list(urls)
+
+# ===== 提取peer dependencies =====
+async def fetch_package_peer_deps(session, package_name, version, registry):
+    """从npm registry获取包的peer dependencies"""
+    try:
+        # 构建registry URL
+        if package_name.startswith('@'):
+            scope, name = package_name.split('/', 1)
+            pkg_url = f"{registry}/{scope}%2F{name}"
+        else:
+            pkg_url = f"{registry}/{package_name}"
+        
+        async with session.get(pkg_url, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            if response.status == 200:
+                data = await response.json()
+                # 获取指定版本的peerDependencies
+                if 'versions' in data and version in data['versions']:
+                    version_data = data['versions'][version]
+                    if 'peerDependencies' in version_data:
+                        return version_data['peerDependencies']
+    except Exception as e:
+        pass
+    return None
+
+def extract_peer_dependencies(package_data):
+    """从package.json提取peer dependencies（需要查询registry）"""
+    urls = []
+    
+    # 合并所有依赖
+    all_deps = {}
+    if 'dependencies' in package_data:
+        all_deps.update(package_data['dependencies'])
+    if 'devDependencies' in package_data and INCLUDE_DEV:
+        all_deps.update(package_data['devDependencies'])
+    if 'optionalDependencies' in package_data and INCLUDE_OPTIONAL:
+        all_deps.update(package_data['optionalDependencies'])
+    
+    if not all_deps:
+        return urls
+    
+    print(f"{emoji.get('🔍')} 正在查询 {len(all_deps)} 个包的peer dependencies...")
+    print(f"{emoji.get('⚠️')} 注意: 此功能会查询npm registry，可能需要较长时间...")
+    
+    # 尝试导入requests，如果没有则跳过
+    try:
+        import requests
+    except ImportError:
+        print(f"{emoji.get('⚠️')} requests库未安装，跳过peer dependencies提取")
+        print(f"{emoji.get('💡')} 提示: 运行 'pip install requests' 安装requests库以支持此功能")
+        return urls
+    for pkg_name, version_spec in all_deps.items():
+        try:
+            # 解析版本范围，获取一个具体版本
+            # 这里简化处理，只查询最新版本
+            if pkg_name.startswith('@'):
+                scope, name = pkg_name.split('/', 1)
+                pkg_url = f"{CUSTOM_REGISTRY}/{scope}%2F{name}"
+            else:
+                pkg_url = f"{CUSTOM_REGISTRY}/{pkg_name}"
+            
+            response = requests.get(pkg_url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                if 'dist-tags' in data and 'latest' in data['dist-tags']:
+                    latest_version = data['dist-tags']['latest']
+                    if 'versions' in data and latest_version in data['versions']:
+                        version_data = data['versions'][latest_version]
+                        if 'peerDependencies' in version_data:
+                            peer_deps = version_data['peerDependencies']
+                            for peer_name, peer_spec in peer_deps.items():
+                                # 构建peer dependency的URL
+                                if peer_name.startswith('@'):
+                                    scope, name = peer_name.split('/', 1)
+                                    peer_url = f"{CUSTOM_REGISTRY}/{scope}%2F{name}/-/{name}-"
+                                else:
+                                    peer_url = f"{CUSTOM_REGISTRY}/{peer_name}/-/{peer_name}-"
+                                
+                                # 尝试获取peer dependency的版本
+                                try:
+                                    if peer_name.startswith('@'):
+                                        peer_pkg_url = f"{CUSTOM_REGISTRY}/{scope}%2F{name}"
+                                    else:
+                                        peer_pkg_url = f"{CUSTOM_REGISTRY}/{peer_name}"
+                                    
+                                    peer_response = requests.get(peer_pkg_url, timeout=10)
+                                    if peer_response.status_code == 200:
+                                        peer_data = peer_response.json()
+                                        if 'dist-tags' in peer_data and 'latest' in peer_data['dist-tags']:
+                                            peer_version = peer_data['dist-tags']['latest']
+                                            if peer_name.startswith('@'):
+                                                peer_url += f"{peer_version}.tgz"
+                                            else:
+                                                peer_url += f"{peer_version}.tgz"
+                                            urls.append(peer_url)
+                                except:
+                                    pass
+        except Exception as e:
+            pass
+    
+    return urls
+
+# ===== 提取包名和版本号 =====
+def extract_package_info(url):
+    """从URL中提取包名和版本号"""
+    try:
+        parsed = urlparse(url)
+        path = unquote(parsed.path)
+        
+        # 尝试提取包名
+        if '/-/' in path:
+            # 格式: /pkg/-/pkg-1.0.0.tgz 或 /@scope/pkg/-/pkg-1.0.0.tgz
+            parts = path.split('/-/')
+            pkg_part = parts[0].strip('/')
+            
+            # 提取版本号
+            file_name = os.path.basename(path)
+            if pkg_part.startswith('@'):
+                # 作用域包 @scope/pkg
+                scope, name = pkg_part.split('/', 1)
+                version_match = re.search(f'{name}-([0-9]+\\.[0-9]+\\.[0-9]+[^)]*?)(\\.tgz|$)', file_name)
+            else:
+                # 普通包
+                name = pkg_part
+                version_match = re.search(f'{name}-([0-9]+\\.[0-9]+\\.[0-9]+[^)]*?)(\\.tgz|$)', file_name)
+                
+            if version_match:
+                version = version_match.group(1)
+                return pkg_part, version
+        
+        # 备用方法：直接从文件名猜测
+        file_name = os.path.basename(path)
+        name_version_match = re.match(r'(.+?)-([0-9]+\.[0-9]+\.[0-9]+[^)]*?)(\.tgz|$)', file_name)
+        if name_version_match:
+            name = name_version_match.group(1)
+            version = name_version_match.group(2)
+            
+            # 检查是否为作用域包
+            if '/-/' in path and '@' in path:
+                parts = path.split('/-/')
+                if parts and parts[0].strip('/'):
+                    return parts[0].strip('/'), version
+            
+            return name, version
+            
+    except Exception as e:
+        pass
+        
+    # 无法提取时返回文件名
+    return os.path.basename(unquote(url)), "未知版本"
+
+# ===== 下载函数 =====
+async def download_file(session, url, semaphore):
+    """使用信号量限制并发下载数量"""
+    # 确保URL格式正确
+    url = clean_package_url(url)
+    mirror_url = replace_registry(url)
+    official_url = url.replace(CUSTOM_REGISTRY, "https://registry.npmjs.org")
+
+    async with semaphore:  # 使用信号量控制并发
+        for attempt in range(MAX_RETRIES):
+            try:
+                current_url = mirror_url if attempt < MAX_RETRIES - 1 else official_url
+                parsed = urlparse(current_url)
+                file_name = os.path.basename(unquote(parsed.path))
+                # 确保文件名安全，直接保存到目标文件夹
+                safe_file_name = sanitize_path(file_name)
+                file_path = os.path.join(PACKAGES_PATH, safe_file_name)
+
+                # 确保目标目录存在
+                os.makedirs(PACKAGES_PATH, exist_ok=True)
+
+                headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0 Safari/537.36"
+                }
+
+                async with session.get(current_url, timeout=TIMEOUT, headers=headers) as response:
+                    response.raise_for_status()
+                    with open(file_path, 'wb') as f:
+                        while True:
+                            chunk = await response.content.read(8192)  # 增大读取块大小
+                            if not chunk:
+                                break
+                            f.write(chunk)
+
+                return None
+            except aiohttp.ClientResponseError as e:
+                if e.status == 404 and mirror_url != official_url:
+                    # 如果是404错误，立即尝试官方源
+                    print(f"{emoji.get('⚠️')} {mirror_url} 未找到, 尝试官方源 {official_url}")
+                    mirror_url = official_url
+                    continue
+                elif attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(1)
+                else:
+                    print(f"{emoji.get('❌')} 下载失败 ({e.status}): {current_url}")
+                    return (url, official_url, f"HTTP {e.status}")
+            except Exception as e:
+                if attempt < MAX_RETRIES - 1:
+                    print(f"{emoji.get('🔁')} 第 {attempt+1} 次失败，正在重试：{current_url}，错误: {str(e)[:100]}")
+                    await asyncio.sleep(1)
+                else:
+                    print(f"{emoji.get('❌')} 下载失败：{current_url} → 可尝试手动下载：{official_url}")
+                    print(f"   错误信息: {str(e)[:100]}")
+                    return (url, official_url, str(e)[:500])
+
+# ===== 主程序 =====
+async def main():
+    # 立即输出，避免用户误以为卡住（配合 line_buffering 或 flush）
+    print("NPM 依赖下载工具 正在启动...", flush=True)
+
+    print(f"""
+{emoji.get("📦")} NPM 依赖下载工具
+============================
+{emoji.get("✅")} 包保存目录: {PACKAGES_PATH}
+{emoji.get("✅")} 并发下载数: {CONCURRENT_LIMIT}
+{emoji.get("✅")} 下载超时秒: {TIMEOUT}
+{emoji.get("✅")} 镜像源地址: {CUSTOM_REGISTRY}
+{emoji.get("✅")} 包含开发依赖: {'是' if INCLUDE_DEV else '否'}
+{emoji.get("✅")} 包含可选依赖: {'是' if INCLUDE_OPTIONAL else '否'}
+{emoji.get("✅")} 包含peer依赖: {'是' if INCLUDE_PEER else '否'}
+============================
+    """, flush=True)
+
+    lock_file = None
+    extract_func = None
+    data = None
+
+    # 确保下载目录存在
+    os.makedirs(PACKAGES_PATH, exist_ok=True)
+    
+    print(f"{emoji.get('🔍')} 检测锁文件...", flush=True)
+
+    if os.path.exists('package-lock.json'):
+        print(f"{emoji.get('✅')} 检测到 npm 锁文件 (package-lock.json)", flush=True)
+        print("正在读取 package-lock.json（文件较大时可能需要几秒）...", flush=True)
+        try:
+            with open("package-lock.json", encoding='utf-8') as f:
+                data = json.load(f)
+            extract_func = extract_npm_urls
+        except json.JSONDecodeError:
+            print(f"{emoji.get('❌')} package-lock.json 格式错误!")
+            return
+    elif os.path.exists('pnpm-lock.yaml'):
+        print(f"{emoji.get('✅')} 检测到 pnpm 锁文件 (pnpm-lock.yaml)")
+        try:
+            with open("pnpm-lock.yaml", encoding='utf-8') as f:
+                data = yaml.safe_load(f)
+            extract_func = extract_pnpm_urls
+        except yaml.YAMLError:
+            print(f"{emoji.get('❌')} pnpm-lock.yaml 格式错误!")
+            return
+    elif os.path.exists('yarn.lock'):
+        print(f"{emoji.get('✅')} 检测到 yarn 锁文件 (yarn.lock)")
+        try:
+            with open("yarn.lock", encoding='utf-8') as f:
+                data = f.read()
+            extract_func = extract_yarn_urls
+        except Exception as e:
+            print(f"{emoji.get('❌')} yarn.lock 读取错误: {str(e)}")
+            return
+    else:
+        print(f"{emoji.get('❌')} 错误: 未找到 package-lock.json, pnpm-lock.yaml 或 yarn.lock!")
+        return
+
+    print(f"{emoji.get('📦')} 解析依赖...")
+    urls = list(extract_func(data))
+    
+    # 如果需要包含peer dependencies，从package.json提取
+    if INCLUDE_PEER and os.path.exists('package.json'):
+        print(f"{emoji.get('🔍')} 提取peer dependencies...")
+        try:
+            with open("package.json", encoding='utf-8') as f:
+                package_data = json.load(f)
+            
+            peer_urls = extract_peer_dependencies(package_data)
+            if peer_urls:
+                print(f"{emoji.get('✅')} 找到 {len(peer_urls)} 个peer dependencies")
+                urls.extend(peer_urls)
+        except Exception as e:
+            print(f"{emoji.get('⚠️')} 提取peer dependencies失败: {str(e)}")
+    
+    # 从 package-lock 中补下未带 resolved 的 peer/optional 依赖（仅 npm lock，需在 session 内解析）
+    missing_specs = []
+    if INCLUDE_PEER_FROM_LOCK and extract_func is extract_npm_urls and isinstance(data, dict) and 'packages' in data:
+        missing_specs = collect_missing_peer_optional_from_lock(data, urls)
+        if missing_specs:
+            print(f"{emoji.get('🔍')} 发现 lock 中未带 resolved 的 peer/optional 依赖 {len(missing_specs)} 个，将向 registry 解析并加入下载列表")
+    
+    # 移除重复URL并排序以提高稳定性（补下 peer-from-lock 的 URL 在下面 session 内合并）
+    unique_urls = sorted(set(urls))
+    total_count = len(unique_urls)
+    
+    if total_count == 0:
+        print(f"{emoji.get('⚠️')} 没有找到任何依赖项。可能是锁文件格式不支持或没有依赖记录。")
+        return
+
+    # 创建信号量以限制并发下载数量
+    semaphore = asyncio.Semaphore(CONCURRENT_LIMIT)
+    timeout = aiohttp.ClientTimeout(total=TIMEOUT)
+    conn = aiohttp.TCPConnector(limit=CONCURRENT_LIMIT)
+    
+    print(f"{emoji.get('🔍')} 准备下载 {total_count} 个包...")
+    print(f"{emoji.get('⏱️')} 开始下载...")
+    
+    start_time = asyncio.get_event_loop().time()
+    failed_downloads = []
+    
+    async with aiohttp.ClientSession(timeout=timeout, connector=conn) as session:
+        # 若有 lock 中缺失的 peer/optional，先向 registry 解析为 tarball URL 并合并
+        if missing_specs:
+            resolved_peer_urls = []
+            for name, range_spec in missing_specs:
+                u = await resolve_spec_to_tarball_url(session, name, range_spec, CUSTOM_REGISTRY)
+                if u:
+                    resolved_peer_urls.append(u)
+                    print(f"{emoji.get('✅')} 解析 peer/optional: {name}@{range_spec} -> {u.split('/')[-1]}")
+                else:
+                    print(f"{emoji.get('⚠️')} 无法解析: {name}@{range_spec}")
+            if resolved_peer_urls:
+                unique_urls = sorted(set(unique_urls) | set(resolved_peer_urls))
+                total_count = len(unique_urls)
+        
+        tasks = [download_file(session, url, semaphore) for url in unique_urls]
+        
+        # 分批处理任务并显示进度
+        completed = 0
+        for i, batch in enumerate(range(0, len(tasks), 10)):
+            batch_tasks = tasks[batch:batch+10]
+            batch_results = await asyncio.gather(*batch_tasks)
+            
+            # 更新进度
+            completed += len(batch_tasks)
+            progress = (completed / total_count) * 100
+            print(f"进度: {completed}/{total_count} ({progress:.1f}%)")
+            
+            # 收集失败的下载 (url, official_url, error_info)
+            for result in batch_results:
+                if result is not None:
+                    failed_downloads.append(result)
+    
+    end_time = asyncio.get_event_loop().time()
+    duration = end_time - start_time
+    
+    success_count = total_count - len(failed_downloads)
+    percent = (success_count / total_count) * 100
+
+    print(f"\n{emoji.get('📊')} 下载结果报告：")
+    print(f"总共下载：{total_count} 个包")
+    print(f"成功：{success_count} 个包 ({percent:.1f}%)")
+    print(f"耗时：{duration:.1f} 秒")
+
+    # 仅将 404/异常/错误写入 logs/npm_package_download.log，正常下载不写入；每次运行覆盖
+    log_dir = os.path.dirname(DOWNLOAD_LOG)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    with open(DOWNLOAD_LOG, "w", encoding="utf-8") as log_file:
+        if failed_downloads:
+            log_file.write(f"# 时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+            log_file.write(f"# 失败数: {len(failed_downloads)}\n\n")
+            formatted_failures = []
+            for item in failed_downloads:
+                url, official_url = item[0], item[1]
+                error_info = item[2] if len(item) >= 3 else "未知错误"
+                pkg_name, version = extract_package_info(url)
+                formatted_failures.append((pkg_name, version, official_url, error_info))
+            for pkg_name, version, url, error_info in sorted(formatted_failures, key=lambda x: x[0].lower()):
+                log_file.write(f"### {pkg_name}@{version}\n")
+                log_file.write(f"错误: {error_info}\n")
+                log_file.write(f"下载链接: {url}\n")
+                log_file.write(f"命令行: curl -L \"{url}\" -o \"{os.path.basename(url)}\"\n\n")
+        # 无失败时不写入任何内容，文件为空
+
+    if not failed_downloads:
+        print(f"{emoji.get('🎉')} 全部下载成功！")
+    else:
+        print(f"{emoji.get('✅')} 成功下载: {success_count} 个包")
+        print(f"{emoji.get('❌')} 下载失败: {len(failed_downloads)} 个包")
+        print(f"\n{emoji.get('🚫')} 失败的包列表（请尝试手动下载）：")
+        for i, item in enumerate(failed_downloads, start=1):
+            url, official_url = item[0], item[1]
+            error_info = item[2] if len(item) >= 3 else ""
+            pkg_name, version = extract_package_info(url)
+            print(f"{i}. {pkg_name}@{version}  {error_info}")
+            print(f"   → 下载链接: {official_url}")
+        print(f"\n{emoji.get('📝')} 404/错误日志已写入：{DOWNLOAD_LOG}")
+
+if __name__ == '__main__':
+    try:
+        # 设置控制台标题
+        if sys.platform == 'win32':
+            try:
+                os.system(f"title NPM包下载工具 v1.0")
+            except:
+                pass
+                
+        # 添加友好的欢迎横幅
+        print("\n" + "="*40)
+        print("     NPM 依赖包下载工具 v1.0")
+        print("="*40 + "\n")
+        
+        # 运行主程序
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{emoji.get('⚠️')} 用户中断，程序退出")
+    except Exception as e:
+        print(f"\n{emoji.get('❌')} 程序出错: {str(e)}")
+        # 显示堆栈跟踪以便调试
+        import traceback
+        traceback.print_exc()
+    finally:
+        # 仅在 .exe 中显示提示
+        if getattr(sys, 'frozen', False):
+            try:
+                print("\n按任意键退出...")
+                input()
+            except:
+                # 如果input()失败，尝试其他方式暂停
+                try:
+                    os.system("pause")
+                except:
+                    pass
