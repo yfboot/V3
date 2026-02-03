@@ -1,6 +1,7 @@
 # ========== 依赖与构建产物 ==========
 # 下载的 npm 包（.tgz），体积大且可重新生成
 packages/
+manual-packages/
 node_modules/
 node_modules_pack/
 
@@ -20,14 +21,12 @@ build/
 
 # ========== 日志与报告 ==========
 logs/
-*.log
-download_log.txt
-missing-packages-report.txt
 
 # ========== 可执行与敏感配置 ==========
-# 本地打包的 exe（若有源码即可重新生成）
 *.exe
 .npmrc
+config.local
+
 package.json
 package-lock.json
 pnpm-lock.yaml

@@ -36,10 +36,16 @@ except ImportError:
     print("请先安装 requests: pip install requests")
     sys.exit(1)
 
-BASE_URL = "http://192.168.139.101:8081"
-REPOSITORY = "npm-test"
-USERNAME = "admin"
-PASSWORD = "admin123"
+from pathlib import Path
+from config_loader import get_nexus_config
+
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_NEXUS_BASE, _NEXUS_REPO, _NEXUS_USER, _NEXUS_PASS = get_nexus_config(_SCRIPT_DIR)
+BASE_URL = _NEXUS_BASE
+REPOSITORY = _NEXUS_REPO
+USERNAME = _NEXUS_USER
+PASSWORD = _NEXUS_PASS
+
 DELETE_LOG = "logs/clear-repository.log"
 MAX_DELETE_WORKERS = 20
 TIMEOUT = 30

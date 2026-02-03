@@ -35,11 +35,16 @@ except ImportError:
     print("请先安装 requests: pip install requests")
     sys.exit(1)
 
-# ========== 配置（可被命令行覆盖；切换时改 BASE_URL 和 REPOSITORY） ==========
-BASE_URL = "http://192.168.139.101:8081"
-REPOSITORY = "npm-test"
-USERNAME = "admin"
-PASSWORD = "admin123"
+from config_loader import get_nexus_config
+
+# ========== 配置（优先从 config.local 读取 Nexus，可被命令行覆盖） ==========
+_SCRIPT_DIR = Path(__file__).resolve().parent
+_NEXUS_BASE, _NEXUS_REPO, _NEXUS_USER, _NEXUS_PASS = get_nexus_config(_SCRIPT_DIR)
+BASE_URL = _NEXUS_BASE
+REPOSITORY = _NEXUS_REPO
+USERNAME = _NEXUS_USER
+PASSWORD = _NEXUS_PASS
+
 PACKAGES_PATH = "./packages"
 UPLOAD_LOG = "logs/publish.log"
 MAX_WORKERS = 50
