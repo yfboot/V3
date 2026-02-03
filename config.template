@@ -3,7 +3,7 @@
 # 私有 npm registry（flow.py 中 npm install 使用，与下方 Nexus 仓库对应）
 PRIVATE_REGISTRY=
 
-# Nexus 私服（publish.py、clear-repository.py 共用）
+# Nexus 私服（publish.py、clear_repository.py 共用）
 NEXUS_BASE_URL=
 NEXUS_REPOSITORY=
 NEXUS_USERNAME=
@@ -12,4 +12,4 @@ NEXUS_PASSWORD=
 # 是否跳过阶段1/2（首次跑完可改为 true，只做阶段3 循环）
 # 0/false=不跳过，1/true=跳过
 SKIP_PHASE1=false
-SKIP_PHASE2=false 
+SKIP_PHASE2=false

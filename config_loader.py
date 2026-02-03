@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-从 config.local 读取公共配置，供 flow.py、publish.py、clear-repository.py 使用。
+从 config.local 读取公共配置，供 flow.py、publish.py、clear_repository.py 使用。
 敏感信息不写在各脚本内，统一在 config.local 配置（模板见 config.template）。
 """
 

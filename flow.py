@@ -7,14 +7,14 @@
 1) 运行 npm_package_download.py 生成 packages/
 2) 如 logs/npm_package_download.log 中有 404/异常 URL，则提取下载链接并补下到 packages/
 3) 运行 publish.py 上传 packages/
-4) 循环执行 npm install（registry 指向私有库），将输出覆盖写入 npm-install.log
+4) 循环执行 npm install（registry 指向私有库），将输出覆盖写入 logs/npm_install.log
    - 若出现 404，则解析缺包 -> 从外网 registry 解析 tarball -> 下载到 manual-packages/
    - 上传 manual-packages/ -> 再次 npm install
    - 直到不再出现 404 为止
 
 说明：
 - 本脚本不会修改你的 npm_package_download.py / publish.py 的行为，只做编排与补齐。
-- npm-install.log 写入 logs/，每次覆盖，不追加。
+- npm_install.log 写入 logs/，每次覆盖，不追加。
 """
 
 from __future__ import annotations
@@ -266,7 +266,7 @@ def main() -> int:
     packages_dir = BASE_DIR / "packages"
     manual_dir = BASE_DIR / "manual-packages"
     download_log = BASE_DIR / "logs" / "npm_package_download.log"
-    npm_install_log = BASE_DIR / "logs" / "npm-install.log"
+    npm_install_log = BASE_DIR / "logs" / "npm_install.log"
 
     # 1) download（可跳过）
     if not skip_phase1:

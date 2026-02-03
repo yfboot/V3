@@ -1,6 +1,15 @@
 # 内网 npm 依赖闭环脚本
 
-在外网机器上：按 `package-lock.json` 下载依赖 → 上传到私有 Nexus（验证作用） → 项目里用私有源执行 `npm install`，缺包时自动补包并重试，直到安装成功。
+在外网机器上：按 `package-lock.json` 下载依赖 → 上传到私有 Nexus → 项目里用私有源执行 `npm install`，缺包时自动补包并重试，直到安装成功。
+
+---
+
+## Skills 编排说明（标准入口）
+
+- **编排入口**：`flow.py`（唯一主流程，适合作为 Skills 的编排脚本）。
+- **执行方式**：`python flow.py`；依赖与配置见下方「快速开始」。
+- **配置**：全部通过 `config.local` 管理（模板 `config.template`），敏感信息不写进脚本，符合规范。
+- **子脚本**：由 flow 按阶段调用 `npm_package_download.py`、`publish.py`；也可单独运行各脚本。
 
 ---
 
@@ -36,7 +45,7 @@
 | 项 | 说明 |
 |----|------|
 | `PRIVATE_REGISTRY` | 私有 npm 仓库地址（flow 中 `npm install` 用），一般与 Nexus 仓库地址一致 |
-| `NEXUS_BASE_URL` | Nexus 服务地址，publish、clear-repository 共用 |
+| `NEXUS_BASE_URL` | Nexus 服务地址，publish、clear_repository 共用 |
 | `NEXUS_REPOSITORY` | Nexus 仓库名 |
 | `NEXUS_USERNAME` / `NEXUS_PASSWORD` | Nexus 登录账号 |
 | `SKIP_PHASE1` | `true` 时跳过「下载 packages/」（首次跑完后可设为 true 只做补包循环） |
@@ -54,7 +63,7 @@
 | **2** | 用 `publish.py` 将 `packages/` 上传到 Nexus |
 | **3** | 循环：临时改写 lock 中 resolved 为私有地址 → `npm install` → 若 404 则解析缺包、从外网下到 `manual-packages/`、上传 → 再 install；结束后恢复 lock 原内容 |
 
-日志：`logs/npm-install.log`、`logs/publish.log`、`logs/npm_package_download.log`。
+日志：`logs/npm_install.log`、`logs/publish.log`、`logs/npm_package_download.log`。
 
 ---
 
@@ -65,9 +74,9 @@
 | **flow.py** | 主入口，串联 下载 → 上传 → npm install 循环（含自动补包） |
 | **npm_package_download.py** | 按 package-lock.json 从外网镜像下载 .tgz 到 `packages/`，可选 `--include-peer`、`--output-dir`、`--registry` |
 | **publish.py** | 将指定目录下 .tgz 批量上传到 Nexus，支持 `--packages-path`、`--base-url`、`--repository` 等；默认直接覆盖，需「已存在则跳过」时用 `--skip-existing` |
-| **clear-repository.py** | 清空 Nexus 指定 npm 仓库（先列数量与依赖树，确认后删除）；删除后建议在 Nexus 界面执行「重建索引」 |
+| **clear_repository.py** | 清空 Nexus 指定 npm 仓库（先列数量与依赖树，确认后删除）；删除后建议在 Nexus 界面执行「重建索引」 |
 
-publish、clear-repository 的 Nexus 地址与账号从 **config.local** 读取（与 flow 共用）；也可用命令行参数覆盖。
+publish、clear_repository 的 Nexus 地址与账号从 **config.local** 读取（与 flow 共用）；也可用命令行参数覆盖。
 
 ---
 

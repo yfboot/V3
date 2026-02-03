@@ -46,7 +46,7 @@ REPOSITORY = _NEXUS_REPO
 USERNAME = _NEXUS_USER
 PASSWORD = _NEXUS_PASS
 
-DELETE_LOG = "logs/clear-repository.log"
+DELETE_LOG = "logs/clear_repository.log"
 MAX_DELETE_WORKERS = 20
 TIMEOUT = 30
 
