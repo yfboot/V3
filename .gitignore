@@ -1,7 +1,7 @@
 # ========== 依赖与构建产物 ==========
 # 下载的 npm 包（.tgz），体积大且可重新生成
 packages/
-manual-packages/
+manual_packages/
 node_modules/
 node_modules_pack/
 

@@ -1,11 +1,8 @@
 # 本地配置模板（敏感信息勿提交）
 # 使用：复制为 config.local，填写后保存。config.local 已在 .gitignore，不会提交。
-# 私有 npm registry（flow.py 中 npm install 使用，与下方 Nexus 仓库对应）
-PRIVATE_REGISTRY=
-
-# Nexus 私服（publish.py、clear_repository.py 共用）
-NEXUS_BASE_URL=
-NEXUS_REPOSITORY=
+#
+# 私有 Nexus 仓库地址，publish、clear_repository、flow 共用
+NEXUS_REGISTRY=
 NEXUS_USERNAME=
 NEXUS_PASSWORD=
 

@@ -7,6 +7,7 @@
 
 from pathlib import Path
 from typing import Tuple
+from urllib.parse import urlparse
 
 
 def load_config(base_dir: Path) -> dict:
@@ -28,11 +29,23 @@ def load_config(base_dir: Path) -> dict:
 def get_nexus_config(base_dir: Path) -> Tuple[str, str, str, str]:
     """
     从 config.local 读取 Nexus 配置。
-    返回 (base_url, repository, username, password)，未配置的项为空字符串。
+    返回 (base_url, repository, username, password)。base_url 与 repository 由 NEXUS_REGISTRY 解析得出。
     """
     cfg = load_config(base_dir)
-    base_url = (cfg.get("NEXUS_BASE_URL") or "").strip().rstrip("/")
-    repository = (cfg.get("NEXUS_REPOSITORY") or "").strip()
+    registry = (cfg.get("NEXUS_REGISTRY") or "").strip().rstrip("/")
     username = (cfg.get("NEXUS_USERNAME") or "").strip()
     password = (cfg.get("NEXUS_PASSWORD") or "").strip()
+    base_url = ""
+    repository = ""
+    if registry:
+        parsed = urlparse(registry)
+        base_url = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+        parts = (parsed.path or "").strip("/").split("/")
+        repository = parts[-1] if parts else ""
     return (base_url, repository, username, password)
+
+
+def get_private_registry(base_dir: Path) -> str:
+    """从 config.local 读取 NEXUS_REGISTRY，供 flow.py 中 npm install 使用。"""
+    cfg = load_config(base_dir)
+    return (cfg.get("NEXUS_REGISTRY") or "").strip().rstrip("/")

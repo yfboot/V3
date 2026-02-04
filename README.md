@@ -24,7 +24,7 @@
 2. **配置**
 
    - 复制 `config.template` 为 `config.local`（该文件不提交）
-   - 在 `config.local` 中填写 `PRIVATE_REGISTRY=`（你的 Nexus npm 仓库地址，与 publish 上传目标一致）
+   - 在 `config.local` 中填写 `NEXUS_REGISTRY=`（私有 Nexus 仓库完整地址，如 `http://host:8081/repository/npm-test`）、`NEXUS_USERNAME=`、`NEXUS_PASSWORD=`
 
 3. **放入依赖清单**
 
@@ -36,7 +36,7 @@
    python flow.py
    ```
 
-   首次运行会：下载依赖到 `packages/` → 上传到 Nexus → 在本目录执行 `npm install --registry <私有地址>`；若出现 404 缺包，会自动从外网解析并下载到 `manual-packages/`、上传后重试，直到无 404 或达到最大轮次。
+   首次运行会：下载依赖到 `packages/` → 上传到 Nexus → 将 package-lock.json 重命名为 .temp 后从私有库执行 `npm install`（从私网解析依赖）；若日志中出现缺包，从公网 registry 查包并下载到 `manual_packages/`、上传后重试，结束后恢复 lock。
 
 ---
 
@@ -44,9 +44,7 @@
 
 | 项 | 说明 |
 |----|------|
-| `PRIVATE_REGISTRY` | 私有 npm 仓库地址（flow 中 `npm install` 用），一般与 Nexus 仓库地址一致 |
-| `NEXUS_BASE_URL` | Nexus 服务地址，publish、clear_repository 共用 |
-| `NEXUS_REPOSITORY` | Nexus 仓库名 |
+| `NEXUS_REGISTRY` | 私有 Nexus 仓库完整地址（如 `http://host:8081/repository/npm-test`），publish、clear_repository、flow 共用 |
 | `NEXUS_USERNAME` / `NEXUS_PASSWORD` | Nexus 登录账号 |
 | `SKIP_PHASE1` | `true` 时跳过「下载 packages/」（首次跑完后可设为 true 只做补包循环） |
 | `SKIP_PHASE2` | `true` 时跳过「上传 packages/」 |
@@ -61,7 +59,7 @@
 |------|------|
 | **1** | 用 `npm_package_download.py` 根据 lock 从外网镜像下载 .tgz 到 `packages/`；若有下载异常 URL 会从日志补下 |
 | **2** | 用 `publish.py` 将 `packages/` 上传到 Nexus |
-| **3** | 循环：临时改写 lock 中 resolved 为私有地址 → `npm install` → 若 404 则解析缺包、从外网下到 `manual-packages/`、上传 → 再 install；结束后恢复 lock 原内容 |
+| **3** | 将 package-lock.json 重命名为 .temp → 从私有库 `npm install`（不读 lock，从私网解析）→ 根据 logs/npm_install.log 分析缺包 → 从公网 registry 查包取 tarball、下载到 `manual_packages/`、上传 → 再 install；结束后恢复 lock |
 
 日志：`logs/npm_install.log`、`logs/publish.log`、`logs/npm_package_download.log`。
 
@@ -91,4 +89,4 @@ publish、clear_repository 的 Nexus 地址与账号从 **config.local** 读取�
 
 - Python 3，`pip install -r requirements.txt`（含 `requests`、`aiohttp`、`PyYAML`）
 - 运行 `flow.py` 的 Step3 需本机已安装 **npm**（且能执行 `npm install`）
-- 本仓库不提交 `package.json`、`package-lock.json`、`config.local`、`packages/`、`manual-packages/`、`logs/`，使用前从业务项目复制依赖清单并填写 config.local
+- 本仓库不提交 `package.json`、`package-lock.json`、`config.local`、`packages/`、`manual_packages/`、`logs/`，使用前从业务项目复制依赖清单并填写 config.local
