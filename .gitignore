@@ -25,10 +25,10 @@ logs/
 # ========== 可执行与敏感配置 ==========
 *.exe
 .npmrc
-config.local
 
 package.json
 package-lock.json
+package-lock.json.backup_for_flow
 pnpm-lock.yaml
 yarn.lock
 
