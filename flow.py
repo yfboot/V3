@@ -42,10 +42,24 @@ def read_local_config(base_dir: Path) -> Tuple[bool, int]:
 
 
 def rewrite_lock_resolved_to_local(lock_path: Path, registry_url: str) -> None:
-    """将 package-lock.json 中所有 resolved 改为本地 registry URL，使 npm 从本地全量安装。"""
+    """将 package-lock.json 中所有 resolved 改为本地 registry URL，使 npm 从本地全量安装。
+    同时移除无效幽灵条目（无 version、resolved、integrity 的空壳），避免 npm 报 Invalid Version。"""
     registry_url = registry_url.rstrip("/")
     data = json.loads(lock_path.read_text(encoding="utf-8"))
     packages = data.get("packages") or {}
+    # 先清理幽灵条目：无 version 且无 resolved/integrity 的条目对 npm 无意义，只会导致 Invalid Version
+    phantom_keys = [
+        key for key, pkg in packages.items()
+        if isinstance(pkg, dict) and key != ""
+        and not (pkg.get("version") or "").strip()
+        and not pkg.get("resolved")
+        and not pkg.get("integrity")
+        and not pkg.get("link")
+    ]
+    for key in phantom_keys:
+        del packages[key]
+    if phantom_keys:
+        print(f"  已移除 {len(phantom_keys)} 个无效幽灵条目（无 version/resolved/integrity）。", flush=True)
     for key, pkg in packages.items():
         if not isinstance(pkg, dict):
             continue
@@ -54,10 +68,8 @@ def rewrite_lock_resolved_to_local(lock_path: Path, registry_url: str) -> None:
         # 支持嵌套：node_modules/a/node_modules/@scope/name → @scope/name
         name = key.replace("\\", "/").split("node_modules/")[-1].strip("/")
         version = (pkg.get("version") or "").strip()
-        # 空版本会导致 npm 报 Invalid Version:，用占位避免
         if not version:
-            pkg["version"] = "0.0.0"
-            continue
+            continue  # 仍无版本的条目（如 link），跳过 resolved 重写
         if name.startswith("@"):
             if "/" not in name:
                 continue  # 异常 lock 条目，如仅 @scope 无包名，跳过

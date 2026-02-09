@@ -24,14 +24,48 @@ except ImportError:
 NPM_PUBLIC_REGISTRY = "https://registry.npmjs.org"
 
 
+def _extract_version_from_tarball_url(url: str, package_name: str) -> str:
+    """从 tarball URL 尾部文件名中提取版本号。
+    如 http://host/@scope%2Fname/-/name-1.2.3.tgz → '1.2.3'"""
+    basename = url.rsplit("/", 1)[-1]           # "typebox-0.27.10.tgz"
+    if basename.endswith(".tgz"):
+        basename = basename[:-4]                # "typebox-0.27.10"
+    short = package_name.rsplit("/", 1)[-1] if "/" in package_name else package_name
+    prefix = short + "-"
+    if basename.startswith(prefix):
+        return basename[len(prefix):]           # "0.27.10"
+    # fallback: 末尾 semver
+    m = re.search(r"-(\d+\.\d+\.\d+.*)$", basename)
+    return m.group(1) if m else ""
+
+
 def extract_404_from_npm_install_log(log_path: Path) -> List[Tuple[str, str]]:
-    """从 npm install 日志解析缺包，返回 [(包名, 版本范围), ...]。"""
+    """从 npm install 日志解析缺包，返回 [(包名, 版本范围), ...]。
+    兼容 lock 被重写为本地 registry URL 后，npm 404 中 range 为完整 URL 的情况。"""
     if not log_path.exists():
         return []
     text = log_path.read_text(encoding="utf-8", errors="ignore")
     found: List[Tuple[str, str]] = []
-    for m in re.finditer(r"404\s+[^']*'([^']+)@([^']+)'\s+is not in this registry", text, re.I):
-        found.append((m.group(1).strip(), m.group(2).strip().rstrip(".")))
+
+    # Pattern 1: 'name@range_or_url' is not in this registry
+    # 用单组捕获引号内完整内容，再智能分割 name / range
+    for m in re.finditer(r"404\s+[^']*'([^']+)'\s+is not in this registry", text, re.I):
+        full = m.group(1).strip()
+        # 若 range 部分是 URL（lock 被重写为本地 registry URL 时会出现），提取真实版本
+        url_m = re.match(r'^(@?[^@]+)@(https?://.+)$', full)
+        if url_m:
+            name = url_m.group(1)
+            version = _extract_version_from_tarball_url(url_m.group(2), name)
+            if version:
+                found.append((name, version))
+                continue
+        # 正常 name@range（从最后一个 @ 分割，兼容 scoped 包）
+        if "@" in full:
+            name, rng = full.rsplit("@", 1)
+            name, rng = name.strip(), rng.strip().rstrip(".")
+            if name and rng:
+                found.append((name, rng))
+
     for m in re.finditer(r"Package\s+'([^']+)'\s+not found", text, re.I):
         found.append((m.group(1).strip(), "latest"))
     for m in re.finditer(r"notarget\s+No matching version found for\s+(.+?)@(\S+)", text, re.I):
