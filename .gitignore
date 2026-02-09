@@ -1,14 +1,8 @@
 # ========== 依赖与构建产物 ==========
-# 下载的 npm 包（.tgz），体积大且可重新生成
 packages/
-manual_packages/
 node_modules/
-node_modules_pack/
 
-# Python 虚拟环境与缓存
-.venv/
-venv/
-env/
+# Python 缓存
 __pycache__/
 *.py[cod]
 *$py.class
@@ -18,14 +12,13 @@ __pycache__/
 .eggs/
 dist/
 build/
+.venv/
+venv/
 
-# ========== 日志与报告 ==========
+# ========== 日志 ==========
 logs/
 
-# ========== 可执行与敏感配置 ==========
-*.exe
-.npmrc
-
+# ========== 项目依赖清单（按需放入，不提交） ==========
 package.json
 package-lock.json
 package-lock.json.backup_for_flow
@@ -48,3 +41,5 @@ Thumbs.db
 *.tmp
 *.temp
 .cache/
+.npmrc
+*.exe

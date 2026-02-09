@@ -4,34 +4,24 @@
 将指定目录下的 .tgz 当作 npm 本地仓库提供 HTTP 服务（类似 Maven .m2/repository）。
 
 可单独运行（不依赖 flow.py）：
-   python local_registry.py [目录1] [目录2] ... [端口]
-   python local_registry.py [端口]
-   - 目录为相对本脚本所在目录的路径，可多个，会合并索引（同时提供多个目录的包）。
+   python registry.py [目录1] [目录2] ... [端口]
+   python registry.py [端口]
+   - 目录为相对本脚本所在目录的路径，可多个，会合并索引。
    - 最后一个参数若为数字则视为端口。
-   - 仅传端口时，默认目录为：packages + manual_packages。
+   - 仅传端口时，默认目录为：packages。
    - 默认端口：4874。
-   - 示例1：python local_registry.py 4874
-   - 示例2：python local_registry.py packages manual_packages 4874
+   - 示例：python registry.py 4874
    启动后在项目根执行：npm install --registry http://127.0.0.1:4874
 """
 
+import json
 import re
 import sys
 from pathlib import Path
 from urllib.parse import unquote
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
-if sys.platform == "win32":
-    import io
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-
-try:
-    from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
-except ImportError:
-    from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler  # type: ignore
+import config  # noqa: F401
 
 _TGZ_NAME_VERSION = re.compile(r"^(.+)-(\d+\.\d+\.\d+(?:[-.]\w+)*)\.tgz$", re.IGNORECASE)
 
@@ -108,7 +98,7 @@ class LocalRegistryHandler(BaseHTTPRequestHandler):
         index = self.server.package_index  # type: ignore
         base_url = self.server.base_url  # type: ignore
 
-        # 重新扫描 packages/manual_packages，使新下载的包生效（无需重启进程）
+        # 重新扫描 packages 目录，使新下载的包生效（无需重启进程）
         if path == "-/rescan":
             roots = getattr(self.server, "package_roots", [])  # type: ignore
             new_index = {}
@@ -167,7 +157,6 @@ class LocalRegistryHandler(BaseHTTPRequestHandler):
         if not pack:
             self.send_error(404)
             return
-        import json
         body = json.dumps(pack).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -183,7 +172,7 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
     """屏蔽客户端中途断开导致的噪声堆栈（npm 并发/取消请求时很常见）。"""
 
     def handle_error(self, request, client_address):  # pragma: no cover
-        exc_type, exc, _ = sys.exc_info()
+        exc_type, _, _ = sys.exc_info()
         if exc_type in (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
             return
         return super().handle_error(request, client_address)
@@ -193,12 +182,11 @@ def main():
     base_dir = Path(__file__).resolve().parent
     argv = sys.argv[1:]
     port_arg = 4874
-    dirs_arg = ["packages", "manual_packages"]
+    dirs_arg = ["packages"]
     if argv:
         if argv[-1].isdigit():
             port_arg = int(argv[-1])
-            # 仅传端口：默认扫描 packages + manual_packages
-            dirs_arg = argv[:-1] if len(argv) > 1 else ["packages", "manual_packages"]
+            dirs_arg = argv[:-1] if len(argv) > 1 else ["packages"]
         else:
             dirs_arg = list(argv)
     index = {}

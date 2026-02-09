@@ -1,6 +1,0 @@
-
-# 阶段一：解析 package-lock.json 并下载依赖到 packages/。0=不跳过，1=跳过
-SKIP_PHASE1=1
-
-# 本地 registry 端口（npm install --registry http://127.0.0.1:端口）
-LOCAL_REGISTRY_PORT=4874

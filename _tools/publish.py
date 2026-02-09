@@ -16,24 +16,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Windows 控制台 UTF-8
-if sys.platform == "win32":
-    import io
-    import locale
-    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    enc = locale.getpreferredencoding()
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding=enc, errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding=enc, errors="replace")
+import requests
 
-try:
-    import requests
-except ImportError:
-    print("请先安装 requests: pip install requests")
-    sys.exit(1)
+import config  # noqa: F401
 
 # ========== 私有仓库占位（请填写后使用，或通过命令行参数覆盖） ==========
 NEXUS_REGISTRY = ""   # 例如 http://localhost:8081/repository/npm-hosted

@@ -1,27 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-阶段三补包：从 npm install 日志解析缺包（404 / not found / notarget / lacks tarball），
-用 npm view 从公网取 tarball 并下载到 manual_packages/。
+补包：从 npm install 日志解析缺包（404 / not found / notarget / lacks tarball），
+用 npm view 从公网取 tarball 并下载到 packages/。
 
 职责：仅做「安装日志 → 缺包列表 → 下载到目录」；不启停 registry、不执行 npm install。
-用法：python supplement_missing.py --log PATH --out-dir DIR [--report-file PATH] [--base-dir DIR]
+用法：python supplement.py --log PATH --out-dir DIR [--report-file PATH] [--base-dir DIR]
   --report-file：将本轮补包列表写入该文件（每行 name@range），供 flow 读取。
 """
 
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-try:
-    import requests
-except ImportError:
-    print("请先安装 requests: pip install requests")
-    sys.exit(1)
+import requests
 
-NPM_PUBLIC_REGISTRY = "https://registry.npmjs.org"
+import config
+
+NPM_PUBLIC_REGISTRY = config.NPM_PUBLIC_REGISTRY
 
 
 def _extract_version_from_tarball_url(url: str, package_name: str) -> str:
@@ -47,11 +44,10 @@ def extract_404_from_npm_install_log(log_path: Path) -> List[Tuple[str, str]]:
     text = log_path.read_text(encoding="utf-8", errors="ignore")
     found: List[Tuple[str, str]] = []
 
-    # Pattern 1: 'name@range_or_url' is not in this registry
-    # 用单组捕获引号内完整内容，再智能分割 name / range
+    # 'name@range_or_url' is not in this registry
     for m in re.finditer(r"404\s+[^']*'([^']+)'\s+is not in this registry", text, re.I):
         full = m.group(1).strip()
-        # 若 range 部分是 URL（lock 被重写为本地 registry URL 时会出现），提取真实版本
+        # range 为 URL 时（lock resolved 被重写），从 URL 提取真实版本
         url_m = re.match(r'^(@?[^@]+)@(https?://.+)$', full)
         if url_m:
             name = url_m.group(1)
@@ -59,7 +55,6 @@ def extract_404_from_npm_install_log(log_path: Path) -> List[Tuple[str, str]]:
             if version:
                 found.append((name, version))
                 continue
-        # 正常 name@range（从最后一个 @ 分割，兼容 scoped 包）
         if "@" in full:
             name, rng = full.rsplit("@", 1)
             name, rng = name.strip(), rng.strip().rstrip(".")
@@ -102,7 +97,7 @@ def get_tarball_via_npm_view(
     ):
         range_spec = "2"
     spec = f"{name}@{range_spec}" if range_spec else name
-    npm_exe = "npm.cmd" if sys.platform == "win32" else "npm"
+    npm_exe = config.NPM
     reg = f"--registry={NPM_PUBLIC_REGISTRY}"
     try:
         out = subprocess.run(
@@ -141,7 +136,7 @@ def get_tarball_via_npm_view(
 
 
 def download_via_curl(url: str, dest: Path, timeout: int = 60) -> bool:
-    curl_exe = "curl.exe" if sys.platform == "win32" else "curl"
+    curl_exe = config.CURL
     cmd = [curl_exe, "-L", "-s", "-S", "-o", str(dest), "--connect-timeout", "15", "--max-time", str(timeout), url]
     try:
         r = subprocess.run(cmd, capture_output=True, encoding="utf-8", errors="replace", timeout=timeout + 10)
@@ -235,9 +230,9 @@ def parse_only_new_file(path: Path) -> List[Tuple[str, str]]:
 
 def main():
     import argparse
-    p = argparse.ArgumentParser(description="从 npm install 日志补包到 manual_packages")
+    p = argparse.ArgumentParser(description="从 npm install 日志解析缺包并补下到 packages")
     p.add_argument("--log", "-l", default="logs/npm_install.log", help="npm install 日志路径")
-    p.add_argument("--out-dir", "-o", default="manual_packages", help="补包输出目录")
+    p.add_argument("--out-dir", "-o", default="packages", help="补包输出目录")
     p.add_argument("--base-dir", "-b", default=".", help="工作目录（npm view 的 cwd）")
     p.add_argument("--report-file", "-r", default="", help="将本轮补包列表写入该文件，每行 name@range")
     p.add_argument("--only-new-file", default="", help="仅补这些包（每行 name@range），不填则补日志中全部缺包")
